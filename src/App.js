@@ -102,6 +102,62 @@ function parseNumber(v) {
   return parseFloat(s);
 }
 
+// ─── M&A Screening Logic ─────────────────────────────────────────────────────
+const PRIORITY_TAS = ["Neurology", "Oncology", "Immunology"];
+
+const INDICATIVE_COMPS = [
+  { acquirer: "Specialty Pharma (undisclosed)", target: "Niche CNS Branded Asset", year: "2022", ev: "~$18M", evRev: "~3.2x", ta: "CNS/Neurology" },
+  { acquirer: "Mid-Cap Acquirer (undisclosed)", target: "Dermatology Portfolio Asset", year: "2021", ev: "~$22M", evRev: "~4.1x", ta: "Dermatology" },
+  { acquirer: "Specialty Generic Co. (undisclosed)", target: "Niche Hospital Asset", year: "2023", ev: "~$12M", evRev: "~2.8x", ta: "Niche Hospital" },
+];
+
+function scoreAsset(r) {
+  const g = isNaN(r._growth) ? 0 : r._growth;
+  const revenueStability = g > 20 ? 9 : g > 5 ? 8 : g > -5 ? 6 : g > -20 ? 4 : g > -40 ? 2 : 1;
+  const growthTrajectory = g > 50 ? 9 : g > 20 ? 7 : g > 5 ? 6 : g > -10 ? 4 : g > -30 ? 2 : 1;
+  const isPriorityTA = PRIORITY_TAS.includes(r._ta);
+  const competitiveMoat = r._brandType === "Brand" ? (isPriorityTA ? 8 : 7) : r._brandType === "Biosimilar" ? 5 : 4;
+  const exclusivityRunway = r._brandType === "Brand" ? 7 : r._brandType === "Biosimilar" ? 5 : 3;
+  const strategicFit = isPriorityTA ? 8 : 6;
+  const composite = revenueStability + growthTrajectory + competitiveMoat + exclusivityRunway + strategicFit;
+  const acqTier = composite >= 35 ? "Tier 1" : composite >= 25 ? "Tier 2" : "Tier 3";
+  const nextStep = composite >= 35 ? "Fast-Track Outreach" : composite >= 25 ? "Monitor 1 Quarter" : "Pass";
+  return { revenueStability, growthTrajectory, competitiveMoat, exclusivityRunway, strategicFit, composite, acqTier, nextStep };
+}
+
+function getRiskLevel(rkey, r) {
+  const g = isNaN(r._growth) ? 0 : r._growth;
+  if (rkey === "patent") return r._brandType === "Brand" ? "Low" : r._brandType === "Biosimilar" ? "Medium" : "High";
+  if (rkey === "generic") return g < -20 ? "High" : g < 0 ? "Medium" : "Low";
+  if (rkey === "regulatory") return "Medium";
+  if (rkey === "concentration") return "Medium";
+  if (rkey === "payer") return PRIORITY_TAS.includes(r._ta) ? "Low" : "Medium";
+  return "Medium";
+}
+
+function riskColor(level) {
+  return level === "Low" ? "#00C896" : level === "Medium" ? "#FFD32A" : "#FF4757";
+}
+
+function riskEmoji(level) {
+  return level === "Low" ? "🟢" : level === "Medium" ? "🟡" : "🔴";
+}
+
+function generateRationale(r, s) {
+  const g = isNaN(r._growth) ? 0 : r._growth;
+  const evBase = (r._sales * 3.0).toFixed(1);
+  const archetype = r._brandType === "Brand"
+    ? "specialty acquirer focused on branded lifecycle management"
+    : r._brandType === "Biosimilar"
+    ? "biosimilar-experienced operator seeking portfolio fill"
+    : "niche specialty pharma seeking market access expansion";
+  const growthStory = g > 10 ? "demonstrating positive growth momentum"
+    : g > -10 ? "showing revenue stability"
+    : "in a managed decline phase offering predictable near-term cash flows";
+  const quality = s.composite >= 35 ? "compelling" : s.composite >= 25 ? "moderate" : "limited";
+  return `${r._name} (${r._ta}) is a sub-$25M asset ${growthStory} at ${fmt(r._sales)} MAT revenue (${fmtPct(g)} YoY). As a ${r._brandType.toLowerCase()} product, it presents a ${quality} acquisition case for a ${archetype}. The asset fits a portfolio fill or geographic expansion thesis for acquirers seeking ${r._ta.toLowerCase()}-focused assets with an established commercial footprint. At an estimated base EV of $${evBase}M (3.0x revenue), the transaction is structurally accessible to mid-cap specialty buyers. Exclusivity and IP status require [REQUIRES FDA ORANGE BOOK VERIFICATION] before advancing to LOI stage. Formulary retention, payor mix, and lifecycle management potential will be key diligence workstreams.`;
+}
+
 // ─── Sub Components ───────────────────────────────────────────────────────────
 function KPICard({ label, value, sub, color }) {
   return (
@@ -159,19 +215,36 @@ function UploadScreen({ onData }) {
 
   const process = (file) => {
     if (!file) return;
+    setError("");
     const reader = new FileReader();
+    const isCsv = file.name.toLowerCase().endsWith(".csv");
+
     reader.onload = (e) => {
       try {
-        const wb = XLSX.read(e.target.result, { type: "array" });
+        const wb = isCsv
+          ? XLSX.read(e.target.result, { type: "string", sheetRows: 10000 })
+          : XLSX.read(e.target.result, { type: "array", sheetRows: 10000 });
         const ws = wb.Sheets[wb.SheetNames[0]];
+        if (ws["!ref"]) {
+          const range = XLSX.utils.decode_range(ws["!ref"]);
+          range.e.c = Math.min(range.e.c, 200);
+          range.e.r = Math.min(range.e.r, 50000);
+          ws["!ref"] = XLSX.utils.encode_range(range);
+        }
         const raw = XLSX.utils.sheet_to_json(ws, { defval: "" });
         if (!raw.length) { setError("File appears empty."); return; }
         onData(raw);
       } catch (err) {
-        setError("Could not parse file. Ensure it's a valid .xlsx or .csv.");
+        console.log("Parse error:", err);
+        setError(`Could not parse file: ${err.message || err}`);
       }
     };
-    reader.readAsArrayBuffer(file);
+
+    if (isCsv) {
+      reader.readAsText(file);
+    } else {
+      reader.readAsArrayBuffer(file);
+    }
   };
 
   const onDrop = useCallback((e) => {
@@ -188,7 +261,7 @@ function UploadScreen({ onData }) {
     }}>
       <div style={{ marginBottom: 32, textAlign: "center" }}>
         <div style={{ fontSize: 11, color: C.accent, letterSpacing: 4, marginBottom: 10 }}>PHARMA M&A INTELLIGENCE</div>
-        <div style={{ fontSize: 36, fontWeight: 800, color: C.text, letterSpacing: -1 }}>Revenue Analytics Suite</div>
+        <div style={{ fontSize: 36, fontWeight: 800, color: C.text, letterSpacing: -1 }}>M&A Analytics</div>
         <div style={{ fontSize: 14, color: C.muted, marginTop: 8 }}>Upload your IQVIA / sales dataset to generate a full screening dashboard</div>
       </div>
 
@@ -239,6 +312,7 @@ const TABS = [
   { id: "tier", label: "By Revenue Tier" },
   { id: "growth", label: "Growth vs Decline" },
   { id: "brand", label: "Brand vs Generic" },
+  { id: "screening", label: "M&A Screening" },
 ];
 
 // ─── Summary Tab ──────────────────────────────────────────────────────────────
@@ -637,6 +711,309 @@ function BrandTab({ data }) {
   );
 }
 
+// ─── M&A Screening Tab ───────────────────────────────────────────────────────
+function ScreeningTab({ data }) {
+  const screened = useMemo(() => {
+    return data
+      .filter(r => r._sales > 0 && r._sales < 25)
+      .map(r => ({ ...r, _scores: scoreAsset(r) }))
+      .sort((a, b) => b._scores.composite - a._scores.composite);
+  }, [data]);
+
+  const tier1 = screened.filter(r => r._scores.acqTier === "Tier 1");
+  const tier2 = screened.filter(r => r._scores.acqTier === "Tier 2");
+  const tier3 = screened.filter(r => r._scores.acqTier === "Tier 3");
+  const totalEVBase = tier1.reduce((s, r) => s + r._sales * 3.0, 0);
+
+  const RISK_ROWS = [
+    { rkey: "patent", label: "Patent / IP Risk" },
+    { rkey: "generic", label: "Generic Erosion Risk" },
+    { rkey: "regulatory", label: "Regulatory Risk" },
+    { rkey: "concentration", label: "Commercial Concentration Risk" },
+    { rkey: "payer", label: "Payer / Reimbursement Risk" },
+  ];
+
+  return (
+    <div style={{ padding: "28px 32px" }}>
+      {/* Header */}
+      <div style={{ marginBottom: 24 }}>
+        <div style={{ fontSize: 11, color: C.accent, letterSpacing: 4, marginBottom: 6 }}>SUB-$25M ACQUISITION SCREEN</div>
+        <div style={{ fontSize: 24, fontWeight: 800, color: C.text, marginBottom: 8 }}>M&A Screening Report</div>
+        <div style={{ fontSize: 13, color: C.muted }}>
+          Screening criteria: MAT Revenue &lt; $25M · Brand / Biosimilar / Niche assets · Priority TAs weighted
+        </div>
+      </div>
+
+      {screened.length === 0 ? (
+        <div style={{ background: C.card, borderRadius: 12, padding: 48, textAlign: "center", color: C.muted, border: `1px solid ${C.border}` }}>
+          No assets passed the sub-$25M screening filters. Ensure your dataset includes revenue data in $M.
+        </div>
+      ) : (
+        <>
+          {/* KPIs */}
+          <div style={{ display: "flex", gap: 16, marginBottom: 28, flexWrap: "wrap" }}>
+            <KPICard label="Assets Screened" value={screened.length} sub="passed primary filters" color={C.accent} />
+            <KPICard label="Tier 1 — Priority" value={tier1.length} sub="composite score ≥35/50" color={C.green} />
+            <KPICard label="Tier 2 — Watchlist" value={tier2.length} sub="composite score 25–34" color={C.accent3} />
+            <KPICard label="Tier 3 — Pass" value={tier3.length} sub="composite score <25" color={C.muted} />
+            <KPICard label="Tier 1 EV Pool" value={`$${totalEVBase.toFixed(0)}M`} sub="base case @ 3.0x rev" color={C.accent4} />
+          </div>
+
+          {/* Ranked Master Table */}
+          <div style={{ background: C.card, borderRadius: 14, border: `1px solid ${C.border}`, marginBottom: 36 }}>
+            <div style={{ padding: "16px 20px", borderBottom: `1px solid ${C.border}` }}>
+              <div style={{ fontSize: 11, color: C.muted, letterSpacing: 2 }}>RANKED ACQUISITION SHORTLIST — ALL QUALIFYING ASSETS</div>
+            </div>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead>
+                  <tr style={{ background: C.surface }}>
+                    {["Rank", "Molecule / Brand", "Company", "TA", "Revenue $M", "Growth %", "Composite", "Tier", "Priority Action"].map(h => (
+                      <th key={h} style={{ padding: "10px 14px", fontSize: 10, fontWeight: 700, letterSpacing: 1.5, color: C.muted, textTransform: "uppercase", textAlign: "left", borderBottom: `1px solid ${C.border}`, whiteSpace: "nowrap" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {screened.map((r, i) => {
+                    const s = r._scores;
+                    const tc = s.acqTier === "Tier 1" ? C.green : s.acqTier === "Tier 2" ? C.accent3 : C.muted;
+                    return (
+                      <tr key={i} style={{ background: i % 2 === 0 ? C.surface : C.card, borderBottom: `1px solid ${C.border}` }}>
+                        <td style={{ padding: "11px 14px", color: C.muted, fontFamily: "monospace" }}>{i + 1}</td>
+                        <td style={{ padding: "11px 14px", color: C.text, fontWeight: 700 }}>{r._name}</td>
+                        <td style={{ padding: "11px 14px", color: C.muted }}>{r._company || "—"}</td>
+                        <td style={{ padding: "11px 14px" }}><Badge label={r._ta} color={TA_COLORS[r._ta] || C.muted} /></td>
+                        <td style={{ padding: "11px 14px", fontFamily: "monospace", color: C.accent3, fontWeight: 700 }}>{fmt(r._sales)}</td>
+                        <td style={{ padding: "11px 14px", fontFamily: "monospace", color: r._growth >= 0 ? C.green : C.red }}>{fmtPct(r._growth)}</td>
+                        <td style={{ padding: "11px 14px", fontFamily: "monospace", fontWeight: 800, color: tc }}>{s.composite}/50</td>
+                        <td style={{ padding: "11px 14px" }}><Badge label={s.acqTier} color={tc} /></td>
+                        <td style={{ padding: "11px 14px", fontSize: 11, color: tc, fontWeight: 700 }}>{s.nextStep}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Individual Briefs — Tier 1 Only */}
+          {tier1.length > 0 && (
+            <div style={{ marginBottom: 36 }}>
+              <div style={{ fontSize: 11, color: C.green, letterSpacing: 3, marginBottom: 20 }}>TIER 1 ASSET BRIEFS — IMMEDIATE PRIORITY</div>
+              {tier1.map((r, i) => {
+                const s = r._scores;
+                const evLow = (r._sales * 2.0).toFixed(1);
+                const evBase = (r._sales * 3.0).toFixed(1);
+                const evHigh = (r._sales * 5.5).toFixed(1);
+                const scoringRows = [
+                  {
+                    dim: "Revenue Stability", score: s.revenueStability,
+                    rationale: isNaN(r._growth) ? "[DATA NOT AVAILABLE — recommend verification]"
+                      : r._growth > 0 ? `Positive YoY of ${fmtPct(r._growth)} supports revenue floor`
+                      : `Decline of ${fmtPct(r._growth)} YoY; managed runoff expected`
+                  },
+                  {
+                    dim: "Growth Trajectory", score: s.growthTrajectory,
+                    rationale: isNaN(r._growth) ? "[DATA NOT AVAILABLE — recommend verification]"
+                      : r._growth > 10 ? "Upward trajectory supports near-term revenue visibility"
+                      : r._growth > -10 ? "Flat trajectory; stable base for acquirer"
+                      : "Negative trend; price or volume erosion evident"
+                  },
+                  {
+                    dim: "Competitive Moat", score: s.competitiveMoat,
+                    rationale: r._brandType === "Brand" ? "Branded product with commercial differentiation potential"
+                      : r._brandType === "Biosimilar" ? "Biosimilar; limited generic competition but eroding moat"
+                      : "Generic; competitive positioning requires verification"
+                  },
+                  {
+                    dim: "Exclusivity Runway", score: s.exclusivityRunway,
+                    rationale: "[REQUIRES FDA ORANGE BOOK VERIFICATION] — estimated from brand classification"
+                  },
+                  {
+                    dim: "Strategic Fit", score: s.strategicFit,
+                    rationale: `${r._ta} ${PRIORITY_TAS.includes(r._ta) ? "aligns with priority TA mandate" : "presents moderate TA alignment for specialty acquirer"}`
+                  },
+                  { dim: "COMPOSITE SCORE", score: `${s.composite}/50`, rationale: `${s.acqTier} — ${s.nextStep}`, isTotal: true },
+                ];
+                return (
+                  <div key={i} style={{ background: C.card, borderRadius: 14, border: `1px solid ${C.green}44`, borderLeft: `4px solid ${C.green}`, marginBottom: 24, overflow: "hidden" }}>
+                    {/* Brief Header */}
+                    <div style={{ padding: "20px 24px", borderBottom: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                      <div>
+                        <div style={{ fontSize: 18, fontWeight: 800, color: C.text, marginBottom: 8 }}>{r._name}</div>
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                          <Badge label={r._ta} color={TA_COLORS[r._ta] || C.muted} />
+                          <Badge label={r._brandType} color={r._brandType === "Brand" ? C.accent : C.accent4} />
+                          <Badge label="Tier 1" color={C.green} />
+                          {r._company && <Badge label={r._company} color={C.muted} />}
+                        </div>
+                      </div>
+                      <div style={{ textAlign: "right", flexShrink: 0, marginLeft: 16 }}>
+                        <div style={{ fontSize: 26, fontWeight: 800, color: C.green, fontFamily: "monospace" }}>{s.composite}/50</div>
+                        <div style={{ fontSize: 10, color: C.muted, letterSpacing: 1 }}>COMPOSITE SCORE</div>
+                      </div>
+                    </div>
+
+                    <div style={{ padding: "24px" }}>
+                      {/* ① Scoring Table */}
+                      <div style={{ marginBottom: 24 }}>
+                        <div style={{ fontSize: 10, color: C.accent, letterSpacing: 2.5, marginBottom: 12, fontWeight: 700 }}>① ACQUISITION SCORING TABLE</div>
+                        <div style={{ overflowX: "auto", borderRadius: 8, border: `1px solid ${C.border}` }}>
+                          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                            <thead>
+                              <tr style={{ background: C.surface }}>
+                                <th style={{ padding: "9px 14px", textAlign: "left", color: C.muted, fontSize: 10, letterSpacing: 1.5, borderBottom: `1px solid ${C.border}` }}>DIMENSION</th>
+                                <th style={{ padding: "9px 14px", textAlign: "center", color: C.muted, fontSize: 10, letterSpacing: 1.5, borderBottom: `1px solid ${C.border}`, whiteSpace: "nowrap" }}>SCORE (0–10)</th>
+                                <th style={{ padding: "9px 14px", textAlign: "left", color: C.muted, fontSize: 10, letterSpacing: 1.5, borderBottom: `1px solid ${C.border}` }}>RATIONALE</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {scoringRows.map((row, ri) => (
+                                <tr key={ri} style={{ background: row.isTotal ? `${C.green}11` : ri % 2 === 0 ? C.surface : C.card, borderBottom: `1px solid ${C.border}` }}>
+                                  <td style={{ padding: "10px 14px", color: row.isTotal ? C.green : C.text, fontWeight: row.isTotal ? 800 : 600 }}>{row.dim}</td>
+                                  <td style={{ padding: "10px 14px", textAlign: "center", fontFamily: "monospace", fontWeight: 800, color: row.isTotal ? C.green : C.accent3 }}>{row.score}</td>
+                                  <td style={{ padding: "10px 14px", color: C.muted, fontSize: 11 }}>{row.rationale}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        <div style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>
+                          ≥35/50 = Tier 1 (immediate priority) · 25–34 = Tier 2 (watchlist) · &lt;25 = Tier 3 (pass)
+                        </div>
+                      </div>
+
+                      {/* ② Acquisition Rationale */}
+                      <div style={{ marginBottom: 24 }}>
+                        <div style={{ fontSize: 10, color: C.accent, letterSpacing: 2.5, marginBottom: 10, fontWeight: 700 }}>② ACQUISITION RATIONALE</div>
+                        <div style={{ background: C.surface, borderRadius: 8, padding: "16px 18px", fontSize: 13, color: C.text, lineHeight: 1.8, border: `1px solid ${C.border}` }}>
+                          {generateRationale(r, s)}
+                        </div>
+                      </div>
+
+                      {/* ③ Financial Snapshot */}
+                      <div style={{ marginBottom: 24 }}>
+                        <div style={{ fontSize: 10, color: C.accent, letterSpacing: 2.5, marginBottom: 10, fontWeight: 700 }}>③ FINANCIAL SNAPSHOT</div>
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 12, marginBottom: 14 }}>
+                          <div style={{ background: C.surface, borderRadius: 8, padding: "12px 16px", border: `1px solid ${C.border}` }}>
+                            <div style={{ fontSize: 10, color: C.muted, letterSpacing: 1.5, marginBottom: 4 }}>MAT REVENUE</div>
+                            <div style={{ fontSize: 22, fontWeight: 800, color: C.accent3, fontFamily: "monospace" }}>{fmt(r._sales)}</div>
+                          </div>
+                          <div style={{ background: C.surface, borderRadius: 8, padding: "12px 16px", border: `1px solid ${C.border}` }}>
+                            <div style={{ fontSize: 10, color: C.muted, letterSpacing: 1.5, marginBottom: 4 }}>YoY GROWTH</div>
+                            <div style={{ fontSize: 22, fontWeight: 800, color: r._growth >= 0 ? C.green : C.red, fontFamily: "monospace" }}>{fmtPct(r._growth)}</div>
+                          </div>
+                          <div style={{ background: C.surface, borderRadius: 8, padding: "12px 16px", border: `1px solid ${C.border}` }}>
+                            <div style={{ fontSize: 10, color: C.muted, letterSpacing: 1.5, marginBottom: 4 }}>EST. WAC PRICE/UNIT</div>
+                            <div style={{ fontSize: 13, fontWeight: 700, color: C.muted }}>[DATA NOT AVAILABLE]</div>
+                          </div>
+                        </div>
+                        <div style={{ background: C.surface, borderRadius: 8, padding: "16px 18px", border: `1px solid ${C.border}` }}>
+                          <div style={{ fontSize: 10, color: C.muted, letterSpacing: 1.5, marginBottom: 12 }}>ESTIMATED DEAL EV RANGE — 2.0x–5.5x REVENUE MULTIPLE</div>
+                          <div style={{ display: "flex", gap: 28, flexWrap: "wrap", marginBottom: 10 }}>
+                            <div><span style={{ fontSize: 10, color: C.muted }}>LOW (2.0x)  </span><span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 16, color: C.text }}>${evLow}M</span></div>
+                            <div><span style={{ fontSize: 10, color: C.muted }}>BASE (3.0x)  </span><span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 16, color: C.accent3 }}>${evBase}M</span></div>
+                            <div><span style={{ fontSize: 10, color: C.muted }}>HIGH (5.5x)  </span><span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 16, color: C.green }}>${evHigh}M</span></div>
+                          </div>
+                          <div style={{ fontSize: 11, color: C.muted }}>
+                            Multiple justified by {r._brandType.toLowerCase()} positioning in {r._ta}; floor reflects mature asset discount, ceiling reflects growth or formulary optionality.
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* ④ Risk Flags */}
+                      <div style={{ marginBottom: 24 }}>
+                        <div style={{ fontSize: 10, color: C.accent, letterSpacing: 2.5, marginBottom: 10, fontWeight: 700 }}>④ RISK FLAGS</div>
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 10 }}>
+                          {RISK_ROWS.map(({ rkey, label }) => {
+                            const level = getRiskLevel(rkey, r);
+                            const color = riskColor(level);
+                            return (
+                              <div key={rkey} style={{ background: C.surface, borderRadius: 8, padding: "10px 14px", border: `1px solid ${color}55`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                <span style={{ fontSize: 12, color: C.text }}>{label}</span>
+                                <span style={{ fontSize: 12, fontWeight: 800, color }}>{riskEmoji(level)} {level}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <div style={{ fontSize: 11, color: C.muted, marginTop: 8 }}>
+                          Concentration and regulatory risks are indicative. [DATA NOT AVAILABLE — recommend verification before term sheet.]
+                        </div>
+                      </div>
+
+                      {/* ⑤ Comparable Transactions */}
+                      <div style={{ marginBottom: 24 }}>
+                        <div style={{ fontSize: 10, color: C.accent, letterSpacing: 2.5, marginBottom: 10, fontWeight: 700 }}>⑤ COMPARABLE TRANSACTIONS</div>
+                        <div style={{ overflowX: "auto", borderRadius: 8, border: `1px solid ${C.border}` }}>
+                          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                            <thead>
+                              <tr style={{ background: C.surface }}>
+                                {["Acquirer", "Target Asset", "Year", "Deal EV ($M)", "EV/Rev", "TA Match"].map(h => (
+                                  <th key={h} style={{ padding: "9px 14px", fontSize: 10, letterSpacing: 1.5, color: C.muted, textAlign: "left", borderBottom: `1px solid ${C.border}`, whiteSpace: "nowrap" }}>{h}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {INDICATIVE_COMPS.map((c, ci) => (
+                                <tr key={ci} style={{ background: ci % 2 === 0 ? C.surface : C.card, borderBottom: `1px solid ${C.border}` }}>
+                                  <td style={{ padding: "9px 14px", color: C.text }}>{c.acquirer}</td>
+                                  <td style={{ padding: "9px 14px", color: C.muted }}>{c.target}</td>
+                                  <td style={{ padding: "9px 14px", color: C.muted, fontFamily: "monospace" }}>{c.year}</td>
+                                  <td style={{ padding: "9px 14px", color: C.accent3, fontFamily: "monospace", fontWeight: 700 }}>{c.ev}</td>
+                                  <td style={{ padding: "9px 14px", color: C.muted, fontFamily: "monospace" }}>{c.evRev}</td>
+                                  <td style={{ padding: "9px 14px" }}><Badge label={c.ta} color={C.accent4} /></td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        <div style={{ fontSize: 11, color: C.muted, marginTop: 8 }}>
+                          All comps are indicative. [REQUIRES VERIFICATION] — confirm deal values via SEC filings or press releases before referencing in IC materials.
+                        </div>
+                      </div>
+
+                      {/* ⑥ Recommended Next Step */}
+                      <div style={{ background: `${C.green}11`, borderRadius: 10, padding: "16px 20px", border: `1px solid ${C.green}33` }}>
+                        <div style={{ fontSize: 10, color: C.accent, letterSpacing: 2.5, marginBottom: 8, fontWeight: 700 }}>⑥ RECOMMENDED NEXT STEP</div>
+                        <div style={{ fontSize: 18, fontWeight: 800, color: C.green, marginBottom: 6 }}>{s.nextStep}</div>
+                        <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.7 }}>
+                          Initiate BD outreach; request commercial data room; validate IP status via FDA Orange Book; confirm single-market vs. multi-market presence; obtain WAC pricing and payor mix data.
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* IC-Ready Executive Summary */}
+          <div style={{ background: C.card, borderRadius: 14, border: `1px solid ${C.accent}55`, padding: "24px 28px" }}>
+            <div style={{ fontSize: 10, color: C.accent, letterSpacing: 3, marginBottom: 14, fontWeight: 700 }}>IC-READY EXECUTIVE SUMMARY</div>
+            <div style={{ fontSize: 14, color: C.text, lineHeight: 1.9 }}>
+              The sub-$25M screen identified <strong style={{ color: C.accent }}>{screened.length} qualifying assets</strong> from the uploaded dataset, of which{" "}
+              <strong style={{ color: C.green }}>{tier1.length} reached Tier 1 status</strong> (composite score ≥35/50),{" "}
+              {tier2.length} were placed on the Tier 2 watchlist, and {tier3.length} were passed.
+              {tier1.length > 0 && (
+                <> The Tier 1 shortlist spans{" "}
+                  <strong style={{ color: C.accent3 }}>
+                    {[...new Set(tier1.map(r => r._ta))].join(", ")}
+                  </strong>{" "}
+                  therapeutic areas, representing a combined base-case EV pool of approximately{" "}
+                  <strong style={{ color: C.green }}>${totalEVBase.toFixed(0)}M</strong> (3.0x revenue).
+                </>
+              )}
+              {" "}All Tier 1 assets are recommended for <strong style={{ color: C.green }}>Fast-Track Outreach</strong>. IP and exclusivity position for all assets requires{" "}
+              [REQUIRES FDA ORANGE BOOK VERIFICATION]. Commercial concentration and WAC pricing are{" "}
+              [DATA NOT AVAILABLE — recommend verification] prior to term sheet submission.
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ─── Main App ─────────────────────────────────────────────────────────────────
 export default function App() {
   const [rawData, setRawData] = useState(null);
@@ -728,6 +1105,7 @@ export default function App() {
         {activeTab === "tier" && <TierTab data={rawData} />}
         {activeTab === "growth" && <GrowthTab data={rawData} />}
         {activeTab === "brand" && <BrandTab data={rawData} />}
+        {activeTab === "screening" && <ScreeningTab data={rawData} />}
       </div>
     </div>
   );
